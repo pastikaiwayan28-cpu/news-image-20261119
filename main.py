@@ -1,62 +1,65 @@
 #!/usr/bin/env python3
-"""news-image-20261119 entry point.
+"""Copy the v2 front-page image to the output directory.
 
-Copies the pre-drawn front page (entry.png, 1024x1024, PNG) that sits
-beside this program to the output directory as /output/entry.png,
-byte for byte. Standard library only, no network, deterministic:
-both runs write identical bytes.
+The entry image is drawn offline by build_frontpage_v2.py and shipped in
+this repository as entry.png. This program validates it thoroughly before
+copying it byte for byte to /output/entry.png, then verifies the copy, so
+running it twice writes identical bytes.
 
-The image itself was drawn offline by build_frontpage.py (Pillow) from
-real reporting on Thursday 19 November 2026 and is shipped in the
-repository, because this program runs with no network.
+Validation (all of it, before any copy):
+  - PNG magic (8 bytes)
+  - first chunk is IHDR, length 13 (so the dimension fields below are real)
+  - IHDR width/height are exactly 1024x1024
+  - file is at most 1 MiB
+  - file ends with a complete IEND chunk (not truncated)
+After the copy the destination is read back and compared by size and
+sha256 against the validated source; a mismatch is a hard failure.
 """
+import hashlib
 import os
 import shutil
 import struct
 import sys
 
-MAX_BYTES = 1_048_576  # 1 MiB, the competition's cap
-MAX_DIM = 1024         # the competition's pixel cap
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "entry.png")
+OUT_DIR = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+DST = os.path.join(OUT_DIR, "entry.png")
+MAX_BYTES = 1048576
 
 
-def check_png(path):
-    """Read the PNG header and confirm magic bytes and dimensions.
-
-    Returns (width, height). Raises ValueError on anything unexpected.
-    """
-    with open(path, "rb") as f:
-        head = f.read(33)
-    if len(head) < 33 or head[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError("entry.png is not a PNG file")
-    if head[12:16] != b"IHDR":
-        raise ValueError("entry.png has no IHDR chunk")
-    width, height = struct.unpack(">II", head[16:24])
-    if width > MAX_DIM or height > MAX_DIM:
-        raise ValueError(f"entry.png is {width}x{height}, over the {MAX_DIM}x{MAX_DIM} cap")
-    return width, height
+def fail(msg):
+    sys.exit(f"entry.png invalid: {msg}")
 
 
 def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-    if not os.path.isfile(src):
-        print("entry.png not found beside main.py", file=sys.stderr)
-        return 1
-    size = os.path.getsize(src)
-    if size > MAX_BYTES:
-        print(f"entry.png is {size} bytes, over the 1 MiB cap", file=sys.stderr)
-        return 1
-    try:
-        width, height = check_png(src)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    os.makedirs(out_dir, exist_ok=True)
-    dst = os.path.join(out_dir, "entry.png")
-    shutil.copyfile(src, dst)
-    print(f"wrote {dst} ({size} bytes, {width}x{height})")
-    return 0
+    with open(SRC, "rb") as fh:
+        data = fh.read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        fail("not a PNG (bad magic)")
+    if len(data) < 33:
+        fail("too short for a PNG header")
+    ihdr_len = struct.unpack(">I", data[8:12])[0]
+    if ihdr_len != 13 or data[12:16] != b"IHDR":
+        fail("first chunk is not IHDR (length 13)")
+    width, height = struct.unpack(">II", data[16:24])
+    if (width, height) != (1024, 1024):
+        fail(f"is {width}x{height}, expected 1024x1024")
+    if len(data) > MAX_BYTES:
+        fail(f"is {len(data)} bytes, over the 1 MiB cap")
+    if data[-12:-8] != b"\x00\x00\x00\x00" or data[-8:-4] != b"IEND":
+        fail("missing or truncated IEND chunk")
+    os.makedirs(OUT_DIR, exist_ok=True)
+    shutil.copyfile(SRC, DST)
+    with open(DST, "rb") as fh:
+        copied = fh.read()
+    if len(copied) != len(data):
+        fail(f"copy is {len(copied)} bytes, source is {len(data)}")
+    if hashlib.sha256(copied).hexdigest() != hashlib.sha256(data).hexdigest():
+        fail("copy sha256 does not match the source")
+    print(f"copied {SRC} -> {DST} ({len(data)} bytes, {width}x{height}, "
+          f"sha256 {hashlib.sha256(data).hexdigest()[:16]}...)")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
